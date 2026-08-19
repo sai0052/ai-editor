@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AI Silence & Filler-Word Editor</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --accent: #6ee7b7;
+    --text: #e7e9ee;
+    --muted: #9aa1ad;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 48px 16px;
+  }
+  .card {
+    width: 100%;
+    max-width: 560px;
+    background: var(--panel);
+    border-radius: 16px;
+    padding: 32px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 28px; font-size: 0.9rem; }
+  .dropzone {
+    border: 2px dashed #3a3f4b;
+    border-radius: 12px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); }
+  .dropzone input { display: none; }
+  button {
+    margin-top: 20px;
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #05261a;
+    font-weight: 600;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { margin-top: 24px; font-size: 0.9rem; color: var(--muted); white-space: pre-line; }
+  .result { margin-top: 20px; padding: 16px; background: #12151b; border-radius: 10px; }
+  a.download {
+    display: inline-block;
+    margin-top: 12px;
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .filename { margin-top: 12px; font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Silence & Filler-Word Remover</h1>
+    <p class="sub">Upload a video or audio file. It'll transcribe it, cut the dead air and "um"s, and hand back a tighter cut.</p>
+
+    <label class="dropzone" id="dropzone">
+      <div id="dzText">Click to choose a file, or drag one here</div>
+      <input type="file" id="fileInput" accept="video/*,audio/*" />
+    </label>
+    <div class="filename" id="filename"></div>
+
+    <button id="uploadBtn" disabled>Process file</button>
+
+    <div class="status" id="status"></div>
+    <div class="result" id="result" style="display:none;"></div>
+  </div>
+
+<script>
+  const API_BASE = ""; // same-origin: frontend and backend are served together now
+
+  const dropzone = document.getElementById("dropzone");
+  const fileInput = document.getElementById("fileInput");
+  const filenameEl = document.getElementById("filename");
+  const uploadBtn = document.getElementById("uploadBtn");
+  const statusEl = document.getElementById("status");
+  const resultEl = document.getElementById("result");
+
+  let selectedFile = null;
+
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("drag"); });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag"));
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("drag");
+    if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files.length) setFile(fileInput.files[0]);
+  });
+
+  function setFile(file) {
+    selectedFile = file;
+    filenameEl.textContent = `Selected: ${file.name}`;
+    uploadBtn.disabled = false;
+  }
+
+  uploadBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+    uploadBtn.disabled = true;
+    resultEl.style.display = "none";
+    statusEl.textContent = "Uploading...";
+
+    const form = new FormData();
+    form.append("file", selectedFile);
+
+    try {
+      const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const data = await res.json();
+      pollStatus(data.job_id);
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+      uploadBtn.disabled = false;
+    }
+  });
+
+  async function pollStatus(jobId) {
+    statusEl.textContent = "Processing — transcribing, then cutting silences & filler words...";
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/status/${jobId}`);
+        const data = await res.json();
+
+        if (data.status === "done") {
+          clearInterval(interval);
+          statusEl.textContent = "Done.";
+          resultEl.style.display = "block";
+          resultEl.innerHTML = `
+            <div>Kept: ${data.kept_seconds}s &nbsp;|&nbsp; Removed: ${data.removed_seconds}s</div>
+            <a class="download" href="${API_BASE}/download/${jobId}">Download edited file</a>
+          `;
+          uploadBtn.disabled = false;
+        } else if (data.status === "error") {
+          clearInterval(interval);
+          statusEl.textContent = `Error: ${data.error}`;
+          uploadBtn.disabled = false;
+        }
+      } catch (err) {
+        clearInterval(interval);
+        statusEl.textContent = `Error checking status: ${err.message}`;
+        uploadBtn.disabled = false;
+      }
+    }, 2000);
+  }
+</script>
+</body>
+</html>
