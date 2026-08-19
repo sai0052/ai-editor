@@ -97,7 +97,11 @@ def download(job_id: str):
 # Serve the frontend. Mounted AFTER the API routes above so /upload, /status,
 # /download keep working — StaticFiles only catches whatever isn't matched
 # by an API route already.
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+# Guarded with isdir() because StaticFiles raises at import time (i.e. app
+# startup) if the directory doesn't exist yet, which would crash the whole
+# container before any routes could even load.
+if os.path.isdir("static"):
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
 if __name__ == "__main__":
@@ -107,4 +111,4 @@ if __name__ == "__main__":
     # to 7860, the Hugging Face Spaces default, if it's not set.
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
