@@ -27,6 +27,10 @@ FILLER_WORDS = {
 SILENCE_GAP_THRESHOLD = 0.6   # seconds of silence between words to cut
 PADDING = 0.06                # seconds of breathing room kept around each spoken word
 
+# "ultrafast" trades a larger output file size for much quicker encoding —
+# worth it here since users care more about turnaround time than file size.
+FFMPEG_PRESET = "ultrafast"
+
 _MODEL = None
 
 
@@ -146,7 +150,7 @@ def cut_and_concat(input_path: str, keep_segments: list[tuple], output_path: str
                 "-ss", f"{start:.3f}",
                 "-i", input_path,
                 "-t", f"{duration:.3f}",
-                "-c:v", "libx264", "-c:a", "aac",
+                "-c:v", "libx264", "-preset", FFMPEG_PRESET, "-c:a", "aac",
                 "-avoid_negative_ts", "make_zero",
                 clip_path,
             ]
@@ -252,6 +256,7 @@ def burn_captions(video_path: str, srt_path: str, output_path: str):
         "ffmpeg", "-y",
         "-i", video_path,
         "-vf", f"subtitles='{escaped}':force_style='{style}'",
+        "-preset", FFMPEG_PRESET,
         "-c:a", "copy",
         output_path,
     ]
