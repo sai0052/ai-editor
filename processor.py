@@ -3,8 +3,9 @@ Core processing logic for the AI silence/filler-word editor.
 
 Pipeline:
 1. Transcribe the media with word-level timestamps (faster-whisper).
-2. Find "junk" spans: long silences between words + filler words (um, uh, like...).
-3. Invert junk spans into "keep" spans.
+2. Find "junk" spans: long silences between words + filler words (um, uh, like...),
+   each independently toggleable by the caller.
+3. Invert junk spans against the full timeline to get the spans to keep.
 4. Cut the keep spans out with ffmpeg and concatenate them back together.
 """
 
@@ -24,8 +25,8 @@ FILLER_WORDS = {
     "like", "you know", "i mean", "sort of", "kind of", "basically",
 }
 
-SILENCE_GAP_THRESHOLD = 0.6   # seconds of silence between words to cut
-PADDING = 0.06                # seconds of breathing room kept around each spoken word
+DEFAULT_SILENCE_GAP_THRESHOLD = 0.6   # seconds of silence between words to cut
+PADDING = 0.06                        # seconds of breathing room kept around each spoken word
 
 # "ultrafast" trades a larger output file size for much quicker encoding —
 # worth it here since users care more about turnaround time than file size.
@@ -84,55 +85,77 @@ def _is_filler(word_text: str) -> bool:
     return cleaned in FILLER_WORDS
 
 
-def find_keep_segments(words: list[Word], total_duration: float):
+def find_keep_segments(
+    words: list[Word],
+    total_duration: float,
+    remove_fillers: bool = True,
+    remove_silences: bool = True,
+    silence_threshold: float = DEFAULT_SILENCE_GAP_THRESHOLD,
+):
     """
-    Walk through words, drop filler words and long silent gaps,
-    and return a list of (start, end) tuples to keep, plus metadata
-    about what was cut.
+    Build a list of spans to CUT (filler words, if enabled, and long silences,
+    if enabled), merge overlapping cuts, then invert against the full timeline
+    to get the spans to KEEP. Returns (keep_segments, removed_fillers_metadata).
+
+    Both remove_fillers and remove_silences can be toggled independently:
+    - both True: original full behavior
+    - remove_silences False: keeps natural pauses, only strips filler words
+    - remove_fillers False: keeps filler words, only strips long dead air
+    - both False: returns the whole clip untouched (single keep segment)
     """
-    keep = []
+    cut_spans = []
     removed_fillers = []
-    cursor = 0.0
+    prev_end = 0.0
 
-    for i, w in enumerate(words):
-        gap = w.start - cursor
-        is_filler = _is_filler(w.text)
-
-        if is_filler:
+    for w in words:
+        if remove_fillers and _is_filler(w.text):
+            cut_spans.append((w.start, w.end))
             removed_fillers.append({"word": w.text, "start": w.start, "end": w.end})
-            # Skip this word entirely; move cursor past it.
-            cursor = w.end
-            continue
 
-        if gap > SILENCE_GAP_THRESHOLD:
-            # Cut the silence: keep up to `cursor`, then jump to just before this word.
-            if cursor > 0:
-                keep.append((max(0.0, cursor - PADDING), cursor + PADDING))
-            start = max(0.0, w.start - PADDING)
-            end = w.end + PADDING
-            keep.append((start, end))
+        gap = w.start - prev_end
+        if remove_silences and gap > silence_threshold:
+            cut_spans.append((prev_end, w.start))
+
+        prev_end = max(prev_end, w.end)
+
+    # Trailing dead air after the last word — only trimmed if silence removal is on.
+    if remove_silences and words:
+        trailing_gap = total_duration - prev_end
+        if trailing_gap > silence_threshold:
+            cut_spans.append((prev_end, total_duration))
+
+    # Merge overlapping/adjacent cut spans.
+    cut_spans.sort()
+    merged_cuts = []
+    for s, e in cut_spans:
+        if merged_cuts and s <= merged_cuts[-1][1]:
+            merged_cuts[-1] = (merged_cuts[-1][0], max(merged_cuts[-1][1], e))
         else:
-            # Extend / merge into the previous keep segment.
-            if keep and keep[-1][1] >= w.start - PADDING:
-                keep[-1] = (keep[-1][0], w.end + PADDING)
-            else:
-                keep.append((max(0.0, w.start - PADDING), w.end + PADDING))
+            merged_cuts.append((s, e))
 
-        cursor = w.end
+    # Shrink each cut inward by PADDING so we don't clip right up against speech.
+    padded_cuts = []
+    for s, e in merged_cuts:
+        s2, e2 = s + PADDING, e - PADDING
+        if e2 > s2:
+            padded_cuts.append((s2, e2))
 
-    # Trailing silence after the last word gets dropped automatically
-    # (we simply don't extend `keep` past the last word's end).
+    # Invert the cuts against [0, total_duration] to get what to keep.
+    keep = []
+    cursor = 0.0
+    for s, e in padded_cuts:
+        if s > cursor:
+            keep.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < total_duration:
+        keep.append((cursor, total_duration))
 
-    # Merge any overlapping/adjacent segments produced above.
-    keep.sort()
-    merged = []
-    for seg in keep:
-        if merged and seg[0] <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]))
-        else:
-            merged.append(seg)
+    if not keep:
+        # Cuts covered the entire clip (e.g. very aggressive settings on a short
+        # file) — fall back to keeping everything rather than an empty video.
+        keep = [(0.0, total_duration)]
 
-    return merged, removed_fillers
+    return keep, removed_fillers
 
 
 def cut_and_concat(input_path: str, keep_segments: list[tuple], output_path: str):
@@ -173,12 +196,14 @@ def cut_and_concat(input_path: str, keep_segments: list[tuple], output_path: str
         subprocess.run(concat_cmd, check=True, capture_output=True)
 
 
-def remap_words_to_new_timeline(words: list[Word], keep_segments: list[tuple]) -> list[Word]:
+def remap_words_to_new_timeline(
+    words: list[Word], keep_segments: list[tuple], remove_fillers: bool = True
+) -> list[Word]:
     """
     The cut/concatenated video has a new, shorter timeline. Take the
-    original (non-filler) words and figure out where they land in that
-    new timeline, so captions line up with the edited video instead of
-    the original.
+    original words (excluding filler words only if they were actually
+    removed) and figure out where they land in that new timeline, so
+    captions line up with the edited video instead of the original.
     """
     remapped = []
     cumulative = 0.0
@@ -186,7 +211,7 @@ def remap_words_to_new_timeline(words: list[Word], keep_segments: list[tuple]) -
     for seg_start, seg_end in keep_segments:
         seg_len = seg_end - seg_start
         for w in words:
-            if _is_filler(w.text):
+            if remove_fillers and _is_filler(w.text):
                 continue
             # Word falls inside this keep segment if it overlaps it.
             if w.start >= seg_start and w.start < seg_end:
@@ -268,22 +293,35 @@ def process_file(
     output_dir: str,
     model_size: str = "tiny",
     add_captions: bool = True,
+    remove_fillers: bool = True,
+    remove_silences: bool = True,
+    silence_threshold: float = DEFAULT_SILENCE_GAP_THRESHOLD,
 ) -> ProcessingResult:
     os.makedirs(output_dir, exist_ok=True)
     job_id = uuid.uuid4().hex[:8]
     cut_output_path = os.path.join(output_dir, f"cut_{job_id}.mp4")
 
     words, duration = transcribe(input_path, model_size=model_size)
-    keep_segments, removed_fillers = find_keep_segments(words, duration)
+    keep_segments, removed_fillers = find_keep_segments(
+        words,
+        duration,
+        remove_fillers=remove_fillers,
+        remove_silences=remove_silences,
+        silence_threshold=silence_threshold,
+    )
     cut_and_concat(input_path, keep_segments, cut_output_path)
 
     kept_seconds = sum(end - start for start, end in keep_segments)
-    transcript = " ".join(w.text for w in words if not _is_filler(w.text))
+    transcript = " ".join(
+        w.text for w in words if not (remove_fillers and _is_filler(w.text))
+    )
 
     final_output_path = cut_output_path
 
     if add_captions:
-        remapped_words = remap_words_to_new_timeline(words, keep_segments)
+        remapped_words = remap_words_to_new_timeline(
+            words, keep_segments, remove_fillers=remove_fillers
+        )
         srt_text = build_srt(remapped_words)
         if srt_text:
             srt_path = os.path.join(output_dir, f"captions_{job_id}.srt")

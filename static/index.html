@@ -46,6 +46,56 @@
   }
   .dropzone:hover, .dropzone.drag { border-color: var(--accent); }
   .dropzone input { display: none; }
+
+  .options {
+    margin-top: 24px;
+    padding: 16px;
+    background: #12151b;
+    border-radius: 10px;
+  }
+  .option-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+  }
+  .option-row label.toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  .option-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .sensitivity-row {
+    padding: 10px 0 4px;
+    border-top: 1px solid #22262f;
+    margin-top: 4px;
+  }
+  .sensitivity-row.disabled { opacity: 0.4; pointer-events: none; }
+  .sensitivity-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .sensitivity-label span.value { color: var(--accent); font-weight: 600; }
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .options-note {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
   button {
     margin-top: 20px;
     width: 100%;
@@ -93,6 +143,36 @@
     </label>
     <div class="filename" id="filename"></div>
 
+    <div class="options">
+      <div class="option-row">
+        <label class="toggle-label" for="removeFillers">
+          <input type="checkbox" id="removeFillers" checked />
+          Remove filler words ("um", "uh", "like"...)
+        </label>
+      </div>
+      <div class="option-row">
+        <label class="toggle-label" for="removeSilences">
+          <input type="checkbox" id="removeSilences" checked />
+          Remove long silences
+        </label>
+      </div>
+      <div class="sensitivity-row" id="sensitivityRow">
+        <div class="sensitivity-label">
+          <span>Silence sensitivity</span>
+          <span class="value" id="sensitivityValue">0.6s</span>
+        </div>
+        <input type="range" id="sensitivitySlider" min="0.2" max="2.0" step="0.1" value="0.6" />
+        <div class="options-note">Lower = cuts shorter pauses too. Higher = only cuts longer dead air.</div>
+      </div>
+      <div class="option-row" style="border-top: 1px solid #22262f; margin-top: 4px; padding-top: 12px;">
+        <label class="toggle-label" for="addCaptions">
+          <input type="checkbox" id="addCaptions" checked />
+          Add burned-in captions
+        </label>
+      </div>
+      <div class="options-note">Turning captions off processes faster, since it skips a second video encoding pass.</div>
+    </div>
+
     <button id="uploadBtn" disabled>Process file</button>
 
     <div class="status" id="status"></div>
@@ -111,8 +191,8 @@
     <h2>How it works</h2>
     <ol>
       <li>Upload a video or audio file.</li>
-      <li>The AI transcribes your speech and detects filler words and long silences.</li>
-      <li>Those sections are automatically cut out and the remaining clips are stitched back together.</li>
+      <li>Choose which edits you want: filler-word removal, silence removal, and captions.</li>
+      <li>The AI transcribes your speech and applies the edits you selected.</li>
       <li>Download your edited file, ready to share or publish.</li>
     </ol>
 
@@ -134,6 +214,13 @@
   const statusEl = document.getElementById("status");
   const resultEl = document.getElementById("result");
 
+  const removeFillersEl = document.getElementById("removeFillers");
+  const removeSilencesEl = document.getElementById("removeSilences");
+  const addCaptionsEl = document.getElementById("addCaptions");
+  const sensitivitySlider = document.getElementById("sensitivitySlider");
+  const sensitivityValue = document.getElementById("sensitivityValue");
+  const sensitivityRow = document.getElementById("sensitivityRow");
+
   let selectedFile = null;
 
   dropzone.addEventListener("click", () => fileInput.click());
@@ -154,6 +241,16 @@
     uploadBtn.disabled = false;
   }
 
+  sensitivitySlider.addEventListener("input", () => {
+    sensitivityValue.textContent = `${parseFloat(sensitivitySlider.value).toFixed(1)}s`;
+  });
+
+  function updateSensitivityRowState() {
+    sensitivityRow.classList.toggle("disabled", !removeSilencesEl.checked);
+  }
+  removeSilencesEl.addEventListener("change", updateSensitivityRowState);
+  updateSensitivityRowState();
+
   uploadBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     uploadBtn.disabled = true;
@@ -162,6 +259,10 @@
 
     const form = new FormData();
     form.append("file", selectedFile);
+    form.append("remove_fillers", removeFillersEl.checked ? "true" : "false");
+    form.append("remove_silences", removeSilencesEl.checked ? "true" : "false");
+    form.append("add_captions", addCaptionsEl.checked ? "true" : "false");
+    form.append("silence_threshold", sensitivitySlider.value);
 
     try {
       const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
@@ -175,7 +276,7 @@
   });
 
   async function pollStatus(jobId) {
-    statusEl.textContent = "Processing — transcribing, then cutting silences & filler words...";
+    statusEl.textContent = "Processing — transcribing, then applying your selected edits...";
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${API_BASE}/status/${jobId}`);

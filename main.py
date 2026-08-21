@@ -3,7 +3,7 @@ import shutil
 import threading
 import uuid
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,10 +39,24 @@ class JobStatus(BaseModel):
     transcript: str | None = None
 
 
-def _run_job(job_id: str, input_path: str):
+def _run_job(
+    job_id: str,
+    input_path: str,
+    add_captions: bool,
+    remove_fillers: bool,
+    remove_silences: bool,
+    silence_threshold: float,
+):
     JOBS[job_id]["status"] = "processing"
     try:
-        result = process_file(input_path, OUTPUT_DIR)
+        result = process_file(
+            input_path,
+            OUTPUT_DIR,
+            add_captions=add_captions,
+            remove_fillers=remove_fillers,
+            remove_silences=remove_silences,
+            silence_threshold=silence_threshold,
+        )
         JOBS[job_id].update({
             "status": "done",
             "output_path": result.output_path,
@@ -56,7 +70,13 @@ def _run_job(job_id: str, input_path: str):
 
 
 @app.post("/upload", response_model=JobStatus)
-async def upload(file: UploadFile = File(...)):
+async def upload(
+    file: UploadFile = File(...),
+    add_captions: bool = Form(True),
+    remove_fillers: bool = Form(True),
+    remove_silences: bool = Form(True),
+    silence_threshold: float = Form(0.6),
+):
     job_id = uuid.uuid4().hex
     ext = os.path.splitext(file.filename or "")[1] or ".mp4"
     input_path = os.path.join(UPLOAD_DIR, f"{job_id}{ext}")
@@ -65,7 +85,11 @@ async def upload(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     JOBS[job_id] = {"status": "queued"}
-    thread = threading.Thread(target=_run_job, args=(job_id, input_path), daemon=True)
+    thread = threading.Thread(
+        target=_run_job,
+        args=(job_id, input_path, add_captions, remove_fillers, remove_silences, silence_threshold),
+        daemon=True,
+    )
     thread.start()
 
     return JobStatus(job_id=job_id, status="queued")
